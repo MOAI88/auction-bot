@@ -270,6 +270,14 @@ def _state():
     try: return json.load(open(STATE_FILE, encoding="utf-8"))
     except Exception: return {"offset": 0, "last_daily": ""}
 
+def _fresh(args):
+    """저장소 최신 코드를 받아 새 프로세스로 실행 → 코드 수정이 버튼에 바로 반영"""
+    import subprocess
+    subprocess.run(["git", "pull", "--rebase", "--autostash", "-q"], cwd=HERE)
+    r = subprocess.run([sys.executable, os.path.join(HERE, "alert.py")] + args, cwd=HERE)
+    if r.returncode != 0:
+        raise RuntimeError("조사 스크립트 실패 (code %s)" % r.returncode)
+
 def listen(seconds):
     """버튼/명령을 기다리며 seconds 동안 대기. 정기 알림 시각이 지나면 하루 1번 실행."""
     os.environ["TZ"] = "Asia/Seoul"; time.tzset()
@@ -278,7 +286,7 @@ def listen(seconds):
     while time.time() < end:
         today = time.strftime("%Y-%m-%d")
         if st.get("last_daily") != today and time.strftime("%H:%M") >= DAILY_AT:
-            try: run(full=False)
+            try: _fresh([])
             except Exception as e: send_telegram("경매 알림 실행 오류: %s" % _html.escape(str(e)[:200]), button=True)
             st["last_daily"] = today; json.dump(st, open(STATE_FILE, "w"))
         wait = int(max(1, min(50, end - time.time() - 5)))
@@ -300,7 +308,7 @@ def listen(seconds):
         json.dump(st, open(STATE_FILE, "w"))
         if rescan:
             send_telegram("조사 중입니다… (약 30초)")
-            try: run(full=True)
+            try: _fresh(["--full"])
             except Exception as e: send_telegram("다시 조사 오류: %s" % _html.escape(str(e)[:200]), button=True)
     json.dump(st, open(STATE_FILE, "w"))
 
