@@ -19,8 +19,8 @@ jobs:
           python-version: "3.12"
       - name: listen for button + daily alert
         env:
-          TELEGRAM_BOT_TOKEN: ${{ 8736806872:AAGFDUvYYCPm_VUn-BVREGuine_j_PbLSr8}}
-          TELEGRAM_CHAT_ID: ${{ Hans_auctionbot }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python alert.py --listen 3240
       - name: save state
         if: always()
