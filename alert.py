@@ -82,7 +82,7 @@ def send_telegram(text, button=False):
     except urllib.error.HTTPError as e:
         print("telegram error:", e.code, json.loads(e.read().decode()).get("description"))
 
-SEARCH = "https://madangs.com/search?state=10&use_type=2002%2B2003%2B2012%2B2013&addr={addr}&low_p_max={pmax}&limit=60&page={page}"
+SEARCH = "https://madangs.com/search?state=10&share=1&use_type=2002%2B2003%2B2012%2B2013&addr={addr}&low_p_max={pmax}&limit=60&page={page}"
 AREAS = {"서울": "11", "남양주": "41360"}
 RISK_TAGS = ["선순위전세권", "지분매각", "건물만매각", "토지만매각", "법정지상권", "유치권", "선순위가처분", "선순위가등기", "대지권미등기", "분묘기지권"]
 WATCH_TAGS = ["재매각", "특별매각조건", "위반건축물", "임차권등기"]
@@ -146,7 +146,8 @@ def fetch_listings(pmax_won=None):
                     min_price=round((_field(seg, "low_price", True) or 0) / 10000),
                     uchal=_field(seg, "m_bid_uchal") or "0", date=_field(seg, "m_bid_date") or "",
                     area=_field(seg, "m_build_area") or "", tags=tags, pub=None,
-                    url="https://madangs.com" + (_field(seg, "case_url") or ""), m_code=code_))
+                    url="https://madangs.com" + (_field(seg, "case_url") or ""), m_code=code_,
+                    share=_field(seg, "m_share_type")))
             if new == 0 or len(segs) < 50:
                 break
             time.sleep(2)
@@ -154,7 +155,9 @@ def fetch_listings(pmax_won=None):
 
 def risk_of(it):
     t = it["tags"]
-    hard = [x for x in RISK_TAGS if x in t]
+    hard = [x for x in RISK_TAGS if x in t] + [x for x in t if "지분" in x]
+    if it.get("share") == "0,2":
+        hard.append("지분물건")
     if "선순위임차인" in t and "대항력포기" not in t:
         hard.append("선순위임차인")
     return hard
