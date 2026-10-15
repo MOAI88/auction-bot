@@ -272,19 +272,35 @@ def run(full=False):
 # 개축 퀀트: 건축물대장 용적률이 현행 상한을 넘는 '기존 건축물 특례' 후보
 # (국토계획법 시행령 제93조 — 법령·계획 변경으로 부적합해진 적법 건물은 종전 규모로 개축 가능)
 # =====================================================================
-G_SEARCH = "https://madangs.com/search?state=10&share=1&use_type=2004%2B2005%2B2006%2B2007%2B3003%2B4002&addr={addr}&limit=60&page={page}"
-G_AREAS = {"서울": "11"}          # 상한표가 서울시 조례 기준이라 서울만
+G_SEARCH = "https://madangs.com/search?state=10&share=1&use_type=2004%2B2005%2B2006%2B2007%2B3003%2B4002&addr={addr}&low_p_max={pmax}&limit=60&page={page}"
+G_AREAS = {"서울": "11", "경기": "41"}
+# ---- 예산 (단위: 만원) ----
+G_BUY_MAX = 35000      # 최저가 상한 (매입 3억 내외)
+G_COST_PER_PY = 700    # 개축 공사비 평당 단가 가정
+G_BUILD_MAX = 30000    # 기존 연면적 그대로 개축 시 공사비 상한 (2억 내외 + 여유)
+G_SHOW_MAX = 20        # 다시 조사 때 최대 표시 건수
 # 서울시 도시계획조례 상한: (용도지역, 용적률%, 건폐율%)
 SEOUL_CAP = [("제1종전용주거지역", 100, 50), ("제2종전용주거지역", 120, 40), ("제1종일반주거지역", 150, 60),
              ("제2종일반주거지역", 200, 60), ("제3종일반주거지역", 250, 50), ("준주거지역", 400, 60),
              ("중심상업지역", 1000, 60), ("일반상업지역", 800, 60), ("근린상업지역", 600, 60), ("유통상업지역", 600, 60),
              ("전용공업지역", 200, 60), ("일반공업지역", 200, 60), ("준공업지역", 400, 60),
              ("보전녹지지역", 50, 20), ("생산녹지지역", 50, 20), ("자연녹지지역", 50, 20)]
+# 서울 외 지역: 국토계획법 시행령 법정 상한 (시·군 조례는 이보다 낮거나 같음 → 초과분은 보수적으로 계산됨)
+STAT_CAP = [("제1종전용주거지역", 100, 50), ("제2종전용주거지역", 150, 50), ("제1종일반주거지역", 200, 60),
+            ("제2종일반주거지역", 250, 60), ("제3종일반주거지역", 300, 50), ("준주거지역", 500, 70),
+            ("중심상업지역", 1500, 90), ("일반상업지역", 1300, 80), ("근린상업지역", 900, 70), ("유통상업지역", 1100, 80),
+            ("전용공업지역", 300, 70), ("일반공업지역", 350, 70), ("준공업지역", 400, 70),
+            ("보전녹지지역", 80, 20), ("생산녹지지역", 100, 20), ("자연녹지지역", 100, 20),
+            ("계획관리지역", 100, 40), ("생산관리지역", 80, 20), ("보전관리지역", 80, 20),
+            ("농림지역", 80, 20), ("자연환경보전지역", 80, 20)]
+ZONE_NAMES = {c[0] for c in STAT_CAP}
 TEMP_FAR = {"제2종일반주거지역": 250, "제3종일반주거지역": 300}   # 서울 소규모 건축 한시 완화
 TEMP_UNTIL = "2028-05-18"
-G_PRE_RATIO = 1.0      # 목록 단계: 경매 건물면적/토지면적 이 값 미만은 상세 조회 생략
-G_MIN_EXCESS = 10      # ㎡, 이보다 작은 초과분은 제외
-G_MAX_YEAR = "2003"    # 서울 용도지역 종세분화(2003.7) 이전 사용승인만 — 이후 건물의 초과분은 인센티브라 특례 대상 아님
+G_PRE_RATIO = 0.2      # 목록 단계: 경매 건물면적/토지면적 이 값 미만은 상세 조회 생략
+G_MIN_EXCESS = 10      # ㎡, 용적률 초과분 최소
+G_MIN_BCR_EXCESS = 5   # ㎡, 건폐율(바닥면적) 초과분 최소
+BAD_ROAD = ("맹지", "세로한면(불)", "세로각지(불)")  # 신축 시 접도·건축선 후퇴 제약이 큰 토지
+G_MAX_YEAR = "2003"    # 용도지역 종세분화(2003.7) 이전 사용승인만 — 이후 건물의 초과분은 인센티브·위반 가능성이 커 제외
 G_CACHE = os.path.join(HERE, "gaechuk.json")
 UA = {"User-Agent": "Mozilla/5.0 (personal auction alert; few runs/day)"}
 
@@ -318,8 +334,8 @@ def _num(v):
 def g_fetch_listings():
     out, seen = [], set()
     for name, code in G_AREAS.items():
-        for page in range(1, 15):
-            html = _get(G_SEARCH.format(addr=code, page=page))
+        for page in range(1, 30):
+            html = _get(G_SEARCH.format(addr=code, page=page, pmax=G_BUY_MAX * 10000))
             segs = _objects(html); new = 0
             for seg in segs:
                 c = _field(seg, "m_code")
@@ -348,9 +364,10 @@ def g_detail(m_code):
     zones = []
     for it in lands:
         for z in (it.get("item_info") or {}).get("지역지구", []):
-            if any(z == c[0] for c in SEOUL_CAP) and z not in zones: zones.append(z)
+            if z in ZONE_NAMES and z not in zones: zones.append(z)
     years = sorted(re.sub(r"\D", "", r.get("사용승인일", ""))[:4] for r in regs if re.search(r"\d{4}", r.get("사용승인일", "")))
-    return dict(land=sum(_num(it.get("land_area_share") or it.get("land_area_float")) for it in lands),
+    roads = [((it.get("item_info") or {}).get("토지대장") or {}).get("도로접면", "") for it in lands]
+    return dict(land=sum(_num(it.get("land_area_share") or it.get("land_area_float")) for it in lands), road=[r for r in roads if r],
                 zones=zones, n_bld=len(regs),
                 reg_total=sum(_num(r.get("연면적")) for r in regs),
                 reg_far=[_num(r.get("용적률")) for r in regs], reg_bcr=[_num(r.get("건폐율")) for r in regs],
@@ -358,23 +375,28 @@ def g_detail(m_code):
                 t=time.strftime("%Y-%m-%d"))
 
 def g_eval(it, d):
-    """현행 상한 대비 대장 용적률 초과분(=개축으로 지킬 수 있는 면적) 계산"""
+    """현행 상한 대비 대장상 초과분(=개축으로 지킬 수 있는 면적) 계산: 용적률(연면적) + 건폐율(바닥면적)"""
     land = d["land"] or it["land"]
-    if land <= 0 or not d["zones"] or d["n_bld"] == 0: return None
-    caps = [c for c in SEOUL_CAP if c[0] in d["zones"]]
+    if land <= 0 or not d["zones"] or d["n_bld"] == 0 or d["reg_total"] <= 0: return None
+    seoul = it["addr"].startswith("서울")
+    caps = [c for c in (SEOUL_CAP if seoul else STAT_CAP) if c[0] in d["zones"]]
+    if not caps: return None
     zone, cap_far, cap_bcr = max(caps, key=lambda c: c[1])  # 걸친 대지는 높은 쪽 기준(보수적)
-    if d["n_bld"] == 1 and d["reg_far"][0] > 0:
-        far, est = d["reg_far"][0], False
-    elif d["reg_total"] > 0:
-        far, est = d["reg_total"] / land * 100, True        # 대장에 용적률이 없으면 연면적/대지 추정(지하 포함 가능)
-    else:
-        return None
-    bcr = d["reg_bcr"][0] if d["n_bld"] == 1 and d["reg_bcr"][0] > 0 else None
+    one = d["n_bld"] == 1
+    if one and d["reg_far"][0] > 0: far, est = d["reg_far"][0], False
+    else: far, est = d["reg_total"] / land * 100, True     # 대장 용적률이 없으면 연면적/대지 추정(지하 포함 가능)
+    bcr, bcr_est = None, False
+    if one and d["reg_bcr"][0] > 0: bcr = d["reg_bcr"][0]
+    elif all(re.match(r"\s*1층\s*/\s*(-|0층)?\s*$", f or "") for f in d["floors"]):
+        bcr, bcr_est = d["reg_total"] / land * 100, True   # 지상 1층·지하 없음 → 연면적 = 바닥면적
     excess = (far - cap_far) / 100 * land
-    temp = TEMP_FAR.get(zone)
-    return dict(zone=zone, cap_far=cap_far, cap_bcr=cap_bcr, far=far, est=est, bcr=bcr, land=land,
-                excess=excess, temp=temp, excess_temp=((far - temp) / 100 * land) if temp else None,
-                year=d["year"], multi=len(d["zones"]) > 1, n_bld=d["n_bld"])
+    bexcess = ((bcr - cap_bcr) / 100 * land) if bcr else 0
+    temp = TEMP_FAR.get(zone) if seoul else None
+    return dict(zone=zone, cap_far=cap_far, cap_bcr=cap_bcr, far=far, est=est, bcr=bcr, bcr_est=bcr_est, land=land,
+                excess=excess, bexcess=bexcess, temp=temp, excess_temp=((far - temp) / 100 * land) if temp else None,
+                year=d["year"], multi=len(d["zones"]) > 1, n_bld=d["n_bld"], seoul=seoul, total=d["reg_total"],
+                cost=d["reg_total"] / 3.3058 * G_COST_PER_PY,
+                road=next((r for r in d.get("road", []) if r in BAD_ROAD), None))
 
 def g_screen(items, log=print):
     try: cache = json.load(open(G_CACHE, encoding="utf-8"))
@@ -386,17 +408,18 @@ def g_screen(items, log=print):
         if it["land"] <= 0 or it["build"] / it["land"] < G_PRE_RATIO: continue
         if re.search(r"\d+층|\d+호", it["addr"]): continue   # 구분건물(호실) 제외
         d = cache.get(it["m_code"])
-        if not d or d.get("t", "") < time.strftime("%Y-%m-%d", time.localtime(time.time() - 30 * 86400)):
+        if not d or "road" not in d or d.get("t", "") < time.strftime("%Y-%m-%d", time.localtime(time.time() - 30 * 86400)):
             try:
                 d = g_detail(it["m_code"]); cache[it["m_code"]] = d; fetched += 1; time.sleep(1.2)
                 if fetched % 15 == 0: json.dump(cache, open(G_CACHE, "w", encoding="utf-8"), ensure_ascii=False)
             except Exception as e:
                 log("detail fail %s %s" % (it["m_code"], type(e).__name__)); continue
         e = g_eval(it, d)
-        if e and e["excess"] >= G_MIN_EXCESS and (not e["year"] or e["year"] <= G_MAX_YEAR):
+        if not e or (e["year"] and e["year"] > G_MAX_YEAR) or e["cost"] > G_BUILD_MAX: continue
+        if e["excess"] >= G_MIN_EXCESS or e["bexcess"] >= G_MIN_BCR_EXCESS or e["road"]:
             hits.append((it, e))
     json.dump(cache, open(G_CACHE, "w", encoding="utf-8"), ensure_ascii=False)
-    hits.sort(key=lambda h: -h[1]["excess"])
+    hits.sort(key=lambda h: (not h[0]["addr"].startswith("서울"), -(max(h[1]["excess"], 0) + max(h[1]["bexcess"], 0)), h[0]["min_price"]))
     log("gaechuk: listings %d, detail fetched %d, hits %d" % (len(items), fetched, len(hits)))
     return hits
 
@@ -412,33 +435,42 @@ def _py(m2): return m2 / 3.3058
 
 def g_fmt(hits, new_codes=None, total=None):
     E = _html.escape
-    head = ("<b>개축 퀀트 · %d건</b>\n"
-            "<i>서울 단독·다가구·근린주택·근생·숙박·고시원 중 2003년 이전 승인 + 대장 용적률이 현행 상한 초과 (위반건축물·지분 제외)\n"
-            "보존 면적 = 개축 시 지킬 수 있는 초과 연면적. 특례 적용은 건축사 확인 필요</i>") % len(hits)
     if not hits:
         extra = (" (현재 조건 충족 %d건 — [개축 퀀트] 버튼으로 전체 보기)" % total) if total else ""
         return ["<b>개축 퀀트</b>\n오늘은 새로 걸린 물건이 없습니다.%s" % extra]
+    more = len(hits) - G_SHOW_MAX
+    hits = hits[:G_SHOW_MAX]
+    head = ("<b>개축 퀀트 · %d건</b>%s\n"
+            "<i>서울·경기 최저가 %s 이하 · 2003년 이전 승인 · 대장 용적률/건폐율이 현행 상한 초과 또는 접도 불리(맹지·세로불) "
+            "(위반건축물·지분 제외) · 개축비는 기존 연면적 × 평당 %d만 가정\n"
+            "서울은 조례, 경기는 법정상한 기준. 특례 적용은 건축사 확인 필요</i>") % (
+            len(hits) + max(more, 0), (" (상위 %d건 표시)" % G_SHOW_MAX) if more > 0 else "", _won(G_BUY_MAX), G_COST_PER_PY)
     blocks = []
     for i, (it, e) in enumerate(hits, 1):
         badge = "  [NEW]" if new_codes is not None and it["m_code"] in new_codes else ""
         rate = (it["min_price"] / it["appraisal"] * 100) if it["appraisal"] else 0
-        far_txt = "%d%%%s" % (round(e["far"]), "(추정)" if e["est"] else "")
-        cap_txt = "현행 %d%%" % e["cap_far"] + (" · 한시 %d%%" % e["temp"] if e["temp"] else "")
-        keep = "▶ 개축 보존 <b>+%d㎡(%.0f평)</b>" % (round(e["excess"]), _py(e["excess"]))
-        if e["temp"]:
-            keep += ("  · 한시 대비 +%d㎡" % round(e["excess_temp"])) if e["excess_temp"] > 0 else "  · 한시 기준으론 신축이 더 큼"
+        cap_name = "현행" if e["seoul"] else "법정상한"
         lines = [
             "━━━━━━━━━━━━",
             "<b>%d. %s</b>%s" % (i, E(_short_addr(it["addr"])), badge),
             "%s · %s%s" % (E(it["case"]), E(it["use"]), (" · %s년 승인" % e["year"]) if e["year"] else ""),
             "매각 <b>%s</b>" % _when(it["date"]),
             "최저 <b>%s</b>  (감정 %s의 %d%% · 유찰 %s회)" % (_won(it["min_price"]), _won(it["appraisal"]), round(rate), it["uchal"]),
-            "%s · 대지 %d㎡(%.0f평)%s" % (E(e["zone"].replace("지역", "")), round(e["land"]), _py(e["land"]), " · 용도지역 2개" if e["multi"] else ""),
-            "대장 용적률 <b>%s</b> → %s" % (far_txt, cap_txt),
-            keep,
+            "%s · 대지 %d㎡(%.0f평) · 대장 연면적 %d㎡(%.0f평)%s" % (E(e["zone"].replace("지역", "")), round(e["land"]), _py(e["land"]),
+                                                       round(e["total"]), _py(e["total"]), " · 용도지역 2개" if e["multi"] else ""),
         ]
-        if e["bcr"] and e["bcr"] > e["cap_bcr"]:
-            lines.append("건폐율 %d%% (현행 %d%%) — 바닥면적도 보존" % (round(e["bcr"]), e["cap_bcr"]))
+        if e["excess"] >= G_MIN_EXCESS:
+            t = "▶ 용적률 <b>%d%%%s</b> → %s %d%% · 연면적 <b>+%d㎡(%.0f평)</b> 보존" % (
+                round(e["far"]), "(추정)" if e["est"] else "", cap_name, e["cap_far"], round(e["excess"]), _py(e["excess"]))
+            if e["temp"]:
+                t += ("  (한시 %d%% 대비 +%d㎡)" % (e["temp"], round(e["excess_temp"]))) if e["excess_temp"] > 0 else "  (한시 %d%% 기준으론 신축이 더 큼)" % e["temp"]
+            lines.append(t)
+        if e["bexcess"] >= G_MIN_BCR_EXCESS:
+            lines.append("▶ 건폐율 <b>%d%%%s</b> → %s %d%% · 바닥 <b>+%d㎡(%.0f평)</b> 보존" % (
+                round(e["bcr"]), "(추정)" if e["bcr_est"] else "", cap_name, e["cap_bcr"], round(e["bexcess"]), _py(e["bexcess"])))
+        if e["road"]:
+            lines.append("▶ 접도 불리 <b>%s</b> — 신축은 접도·건축선 후퇴로 막히거나 줄지만 기존 규모 개축은 가능성 · 주차 추가 의무 없음" % E(e["road"]))
+        lines.append("개축비 약 <b>%s</b> (기존 %.0f평 그대로)" % (_won(e["cost"]), _py(e["total"])))
         if e["n_bld"] > 1: lines.append("건물 %d동 합산" % e["n_bld"])
         warn = [t for t in it["tags"] if t in WATCH_TAGS + ["선순위임차인", "대항력포기"]]
         if warn: lines.append("주의: " + E(", ".join(warn)))
