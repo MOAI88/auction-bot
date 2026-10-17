@@ -236,7 +236,7 @@ def fmt(hits, new_codes=None):
         ]
         if warn:
             lines.append("주의: " + E(", ".join(warn)))
-        lines.append('<a href="%s">경매마당에서 보기</a>' % E(it["url"]))
+        lines.append(E(it["url"]))   # 텍스트 링크(<a>)는 텔레그램이 확인창을 띄워서 URL 그대로 노출
         blocks.append("\n".join(lines))
     msgs, cur = [], head
     for b in blocks:
@@ -299,7 +299,7 @@ TEMP_UNTIL = "2028-05-18"
 G_PRE_RATIO = 0.2      # 목록 단계: 경매 건물면적/토지면적 이 값 미만은 상세 조회 생략
 G_MIN_EXCESS = 10      # ㎡, 용적률 초과분 최소
 G_MIN_BCR_EXCESS = 5   # ㎡, 건폐율(바닥면적) 초과분 최소
-BAD_ROAD = ("맹지", "세로한면(불)", "세로각지(불)")  # 신축 시 접도·건축선 후퇴 제약이 큰 토지
+BAD_ROAD = ("맹지", "세로한면(불)", "세로각지(불)")  # 차가 못 들어가는 좁은 길·맹지 → '좁은 길'로 표시해 맨 아래 (신축이 막혀 개축 특례 후보)
 G_MAX_YEAR = "2003"    # 용도지역 종세분화(2003.7) 이전 사용승인만 — 이후 건물의 초과분은 인센티브·위반 가능성이 커 제외
 G_CACHE = os.path.join(HERE, "gaechuk.json")
 UA = {"User-Agent": "Mozilla/5.0 (personal auction alert; few runs/day)"}
@@ -396,7 +396,8 @@ def g_eval(it, d):
                 excess=excess, bexcess=bexcess, temp=temp, excess_temp=((far - temp) / 100 * land) if temp else None,
                 year=d["year"], multi=len(d["zones"]) > 1, n_bld=d["n_bld"], seoul=seoul, total=d["reg_total"],
                 cost=d["reg_total"] / 3.3058 * G_COST_PER_PY,
-                road=next((r for r in d.get("road", []) if r in BAD_ROAD), None))
+                road=next((r for r in d.get("road", []) if r not in BAD_ROAD), None),
+                road_bad=bool(d.get("road")) and all(r in BAD_ROAD for r in d["road"]), roads=d.get("road", []))
 
 def g_screen(items, log=print):
     try: cache = json.load(open(G_CACHE, encoding="utf-8"))
@@ -416,10 +417,11 @@ def g_screen(items, log=print):
                 log("detail fail %s %s" % (it["m_code"], type(e).__name__)); continue
         e = g_eval(it, d)
         if not e or (e["year"] and e["year"] > G_MAX_YEAR) or e["cost"] > G_BUILD_MAX: continue
-        if e["excess"] >= G_MIN_EXCESS or e["bexcess"] >= G_MIN_BCR_EXCESS or e["road"]:
+        if e["excess"] >= G_MIN_EXCESS or e["bexcess"] >= G_MIN_BCR_EXCESS or e["road_bad"]:
             hits.append((it, e))
     json.dump(cache, open(G_CACHE, "w", encoding="utf-8"), ensure_ascii=False)
-    hits.sort(key=lambda h: (not h[0]["addr"].startswith("서울"), -(max(h[1]["excess"], 0) + max(h[1]["bexcess"], 0)), h[0]["min_price"]))
+    tier = lambda e: 2 if e["road_bad"] else (0 if e["road"] else 1)   # 좋은 길 → 도로 미확인 → 좁은 길
+    hits.sort(key=lambda h: (tier(h[1]), not h[0]["addr"].startswith("서울"), -(max(h[1]["excess"], 0) + max(h[1]["bexcess"], 0)), h[0]["min_price"]))
     log("gaechuk: listings %d, detail fetched %d, hits %d" % (len(items), fetched, len(hits)))
     return hits
 
@@ -438,15 +440,18 @@ def g_fmt(hits, new_codes=None, total=None):
     if not hits:
         extra = (" (현재 조건 충족 %d건 — [개축 퀀트] 버튼으로 전체 보기)" % total) if total else ""
         return ["<b>개축 퀀트</b>\n오늘은 새로 걸린 물건이 없습니다.%s" % extra]
-    more = len(hits) - G_SHOW_MAX
-    hits = hits[:G_SHOW_MAX]
+    good = [h for h in hits if not h[1]["road_bad"]]   # 좋은 길(·미확인)은 모두, 좁은 길은 남는 자리만
+    more = len(hits) - max(G_SHOW_MAX, len(good))
+    hits = hits[:max(G_SHOW_MAX, len(good))]
     head = ("<b>개축 퀀트 · %d건</b>%s\n"
-            "<i>서울·경기 최저가 %s 이하 · 2003년 이전 승인 · 대장 용적률/건폐율이 현행 상한 초과 또는 접도 불리(맹지·세로불) "
-            "(위반건축물·지분 제외) · 개축비는 기존 연면적 × 평당 %d만 가정\n"
+            "<i>서울·경기 최저가 %s 이하 · 2003년 이전 승인 · 대장 용적률/건폐율이 현행 상한 초과 또는 좁은 길(맹지·세로불) "
+            "(위반건축물·지분 제외) · 좋은 길 먼저, 좁은 길은 아래 · 개축비는 기존 연면적 × 평당 %d만 가정\n"
             "서울은 조례, 경기는 법정상한 기준. 특례 적용은 건축사 확인 필요</i>") % (
-            len(hits) + max(more, 0), (" (상위 %d건 표시)" % G_SHOW_MAX) if more > 0 else "", _won(G_BUY_MAX), G_COST_PER_PY)
+            len(hits) + max(more, 0), (" (상위 %d건 표시)" % len(hits)) if more > 0 else "", _won(G_BUY_MAX), G_COST_PER_PY)
     blocks = []
     for i, (it, e) in enumerate(hits, 1):
+        if e["road_bad"] and (i == 1 or not hits[i - 2][1]["road_bad"]):
+            blocks.append("━━━━━━━━━━━━\n<b>▼ 좁은 길 물건 (맹지·세로불)</b>")
         badge = "  [NEW]" if new_codes is not None and it["m_code"] in new_codes else ""
         rate = (it["min_price"] / it["appraisal"] * 100) if it["appraisal"] else 0
         cap_name = "현행" if e["seoul"] else "법정상한"
@@ -468,13 +473,15 @@ def g_fmt(hits, new_codes=None, total=None):
         if e["bexcess"] >= G_MIN_BCR_EXCESS:
             lines.append("▶ 건폐율 <b>%d%%%s</b> → %s %d%% · 바닥 <b>+%d㎡(%.0f평)</b> 보존" % (
                 round(e["bcr"]), "(추정)" if e["bcr_est"] else "", cap_name, e["cap_bcr"], round(e["bexcess"]), _py(e["bexcess"])))
-        if e["road"]:
-            lines.append("▶ 접도 불리 <b>%s</b> — 신축은 접도·건축선 후퇴로 막히거나 줄지만 기존 규모 개축은 가능성 · 주차 추가 의무 없음" % E(e["road"]))
+        if e["road_bad"]:
+            lines.append("▶ <b>좁은 길</b> %s — 신축은 접도·건축선 후퇴로 막히거나 줄지만 기존 규모 개축은 가능성 · 주차 추가 의무 없음" % E(", ".join(dict.fromkeys(e["roads"]))))
+        else:
+            lines.append("도로 %s" % (E(e["road"]) if e["road"] else "미확인 (토지대장에 도로접면 없음 — 지도로 확인)"))
         lines.append("개축비 약 <b>%s</b> (기존 %.0f평 그대로)" % (_won(e["cost"]), _py(e["total"])))
         if e["n_bld"] > 1: lines.append("건물 %d동 합산" % e["n_bld"])
         warn = [t for t in it["tags"] if t in WATCH_TAGS + ["선순위임차인", "대항력포기"]]
         if warn: lines.append("주의: " + E(", ".join(warn)))
-        lines.append('<a href="%s">경매마당에서 보기</a>' % E(it["url"]))
+        lines.append(E(it["url"]))   # 텍스트 링크(<a>)는 텔레그램이 확인창을 띄워서 URL 그대로 노출
         blocks.append("\n".join(lines))
     return _split(head, blocks)
 
