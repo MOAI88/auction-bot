@@ -133,12 +133,12 @@ def _objects(html):
 
 def fetch_listings(pmax_won=None):
     """경매마당 /search 페이지(robots 허용 경로)에서 서울·남양주 다세대·연립 진행 물건 수집. 금액 단위 만원."""
-    if pmax_won is None:
-        pmax_won = max_bid(70, None, "서울") * 10000
+    top = RENT_STEPS[-1] if _rent_key() else RENT_STEPS_NOKEY
     out, seen = [], set()
     for name, code in AREAS.items():
-        for page in range(1, 6):
-            url = SEARCH.format(addr=code, pmax=int(pmax_won), page=page)
+        pm = pmax_won or max(max_bid(top, None, r) for r in REGION if r.startswith(name)) * 10000
+        for page in range(1, 11):
+            url = SEARCH.format(addr=code, pmax=int(pm), page=page)
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (personal auction alert; 1 run/day)"})
             html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore").replace('\\"', '"')
             segs = _objects(html)
@@ -172,7 +172,8 @@ def risk_of(it):
         hard.append("선순위임차인")
     return hard
 
-RENT_STEPS = [40, 45, 50, 55, 60, 65, 70]
+RENT_STEPS = list(range(40, 125, 5))   # 필요 월세 후보 40~120만. 실거래 확인이 꺼져 있으면 70만까지만
+RENT_STEPS_NOKEY = 70
 
 # =====================================================================
 # 실거래 월세 검증: 국토교통부 연립다세대 전월세 실거래가(data.go.kr)로
@@ -208,7 +209,12 @@ def _locality(addr):
     t = addr.split()
     lawd = next((LAWD[x] for x in t[:3] if x in LAWD), None)
     umd = next((x for x in t[1:4] if re.search(r"(동|읍|면|가)$", x) and x not in LAWD), None)
+    if not umd:   # 도로명 주소: "… (홍은동,피브이395)" 괄호 안의 동
+        m = re.search(r"\(([가-힣0-9]+(?:동|가))[,)]", addr)
+        umd = m.group(1) if m else None
     return lawd, umd
+
+UNDER = r"지하|지층|지\d층|비0"   # 지하층·제지층·지1층·비01호
 
 def _rent_fetch(lawd, ym, key):
     rows, page = [], 1
@@ -224,7 +230,9 @@ def _rent_fetch(lawd, ym, key):
             g = lambda tag: (re.search(r"<%s>\s*([^<]*?)\s*</%s>" % (tag, tag), it) or [None, ""])[1]
             rent = _num(g("monthlyRent"))
             if rent <= 0: continue   # 전세 제외
-            rows.append([g("umdNm"), _num(g("excluUseAr")), _num(g("deposit")), rent, int(_num(g("floor")) or 0)])
+            dep = _num(g("deposit"))
+            if dep > RENT_MAX_DEP: continue   # 반전세는 저장도 안 함 (RENT_MAX_DEP 를 올리면 rent.json 삭제 후 다시 받기)
+            rows.append([(g("umdNm").split() or [""])[0], round(_num(g("excluUseAr")), 1), dep, rent, int(_num(g("floor")) or 0)])
         tc = re.search(r"<totalCount>\s*(\d+)", x)
         if not items or page * 1000 >= int(tc.group(1) if tc else 0): break
         page += 1; time.sleep(0.3)
@@ -253,7 +261,7 @@ def market_rent(it, key, cache):
     area = _num(it["area"])
     if not lawd or not umd or area <= 0: return None
     tol = max(area * RENT_AREA_TOL, 7)
-    under = bool(re.search(r"지하|비0", it["addr"]))
+    under = bool(re.search(UNDER, it["addr"]))
     eq = sorted(r[3] + (r[2] - P["dep"]) * RENT_CONV / 12 for r in _rent_rows(lawd, key, cache)
                 if r[0].split()[:1] == [umd] and abs(r[1] - area) <= tol and ((r[4] < 0) == under) and r[2] <= RENT_MAX_DEP)
     if len(eq) < RENT_MIN_DEALS: return dict(n=len(eq), umd=umd)
@@ -264,13 +272,14 @@ def market_rent(it, key, cache):
 def screen(items):
     """최저가로 낙찰 시 목표(15%·월 20만)를 맞추는 데 필요한 최소 월세를 붙여 반환"""
     hits = []
+    steps = RENT_STEPS if _rent_key() else [r for r in RENT_STEPS if r <= RENT_STEPS_NOKEY]
     for it in items:
         reg = region_of(it["addr"])
         if not reg or it["min_price"] <= 0 or risk_of(it):
             continue
         if it["date"] and it["date"] <= time.strftime("%Y-%m-%d"):  # 오늘·지난 매각일 제외
             continue
-        for r in RENT_STEPS:
+        for r in steps:
             cap = max_bid(r, it.get("pub"), reg)
             if cap and it["min_price"] <= cap:
                 hits.append((it, reg, r, cap, calc(it["min_price"], r, it.get("pub"), reg)))
@@ -316,7 +325,7 @@ def _rent_note():
     return t + (" · 조회 실패 %d" % s["err"] if s["err"] else "")
 
 def _short_addr(a):
-    for p in ["서울특별시 ", "경기도 남양주시 "]:
+    for p in ["서울특별시 ", "경기도 남양주시 ", "경기 남양주시 ", "서울 "]:
         a = a.replace(p, "")
     a = re.sub(r"\s+", " ", a).strip()
     return a
@@ -340,7 +349,7 @@ def fmt(hits, new_codes=None):
     for i, (it, reg, r, cap, d, mk) in enumerate(hits, 1):
         badges = []
         if new_codes is not None and it["m_code"] in new_codes: badges.append("NEW")
-        if "지하" in it["addr"] or "비0" in it["addr"]: badges.append("반지하")
+        if re.search(UNDER, it["addr"]): badges.append("반지하")
         warn = [t for t in it["tags"] if t in WATCH_TAGS + ["대항력포기", "선순위임차인"]]
         rate = (it["min_price"] / it["appraisal"] * 100) if it["appraisal"] else 0
         lines = [
@@ -355,11 +364,12 @@ def fmt(hits, new_codes=None):
         ]
         if mk:
             lines.append("   %s 전용 %d~%d㎡%s 최근 %d개월 월세 %d건 · 중간 %d만 (%d~%d만)" % (
-                E(mk["umd"]), round(mk["amin"]), round(mk["amax"]), " 지하" if re.search(r"지하|비0", it["addr"]) else "",
+                E(mk["umd"]), round(mk["amin"]), round(mk["amax"]), " 지하" if re.search(UNDER, it["addr"]) else "",
                 RENT_MONTHS, mk["n"], round(mk["rent"]), round(mk["lo"]), round(mk["hi"])))
         if warn:
             lines.append("주의: " + E(", ".join(warn)))
         lines.append(E(it["url"]))   # 텍스트 링크(<a>)는 텔레그램이 확인창을 띄워서 URL 그대로 노출
+        lines.append("찜하기 /pick_%s" % it["m_code"])
         blocks.append("\n".join(lines))
     msgs, cur = [], head
     for b in blocks:
@@ -605,6 +615,7 @@ def g_fmt(hits, new_codes=None, total=None):
         warn = [t for t in it["tags"] if t in WATCH_TAGS + ["선순위임차인", "대항력포기"]]
         if warn: lines.append("주의: " + E(", ".join(warn)))
         lines.append(E(it["url"]))   # 텍스트 링크(<a>)는 텔레그램이 확인창을 띄워서 URL 그대로 노출
+        lines.append("찜하기 /pick_%s" % it["m_code"])
         blocks.append("\n".join(lines))
     return _split(head, blocks)
 
@@ -632,6 +643,95 @@ def _state():
     try: return json.load(open(STATE_FILE, encoding="utf-8"))
     except Exception: return {"offset": 0, "last_daily": ""}
 
+# =====================================================================
+# 찜 + D-day 알림: 메시지의 /pick_사건코드 를 누르면 state.json 의 picks 에 저장,
+# 매일 PICK_CHECK_AT 에 사건 페이지를 다시 읽어 D-7·D-1 알림, 유찰·매각 결과 알림
+# =====================================================================
+PICK_CHECK_AT = "08:30"   # KST
+PICK_DDAYS = (7, 1)
+
+def case_info(m_code):
+    """경매마당 사건 페이지(/caview)에서 매각일·최저가·입찰보증금·법정·결과를 읽음 (금액 만원)"""
+    h = _get("https://madangs.com/caview?m_code=" + m_code)
+    g = lambda pat, d="": (re.search(pat, h) or [None, d])[1]
+    segs = [x for x in _objects(h) if _field(x, "m_code") == m_code]
+    pick = lambda k: next((v for v in (_field(x, k) for x in segs) if v), "")
+    date = g(r'"bid":\{"bid_date":"([\d-]*)"')
+    times = re.findall(r'"dxdyTime":"([\d.]+)\((\d\d:\d\d)\)"[^}]*?"dxdyPlcNm":"([^"]*)"', h)
+    when = next(((t, pl) for d, t, pl in times if d.replace(".", "-") == date), ("", ""))
+    return dict(code=m_code, case=(pick("bubwon_short") + " " + pick("case_num")).strip(), addr=pick("addr"),
+                date=date, time=when[0], place=when[1], uchal=g(r'"uchal_str":"([^"]*)"'),
+                min_price=round(int(g(r'"last_price":(\d+)', "0")) / 10000), sell=round(int(g(r'"sell_price":(\d+)', "0")) / 10000),
+                deposit=round(int(g(r'"bj_price":(\d+)', "0")) / 10000), dep_rate=int(g(r'"bjp":(\d+)', "10")),
+                url="https://madangs.com/caview?m_code=" + m_code)
+
+def _pick_text(c, title):
+    E = _html.escape
+    return "\n".join(x for x in [
+        "<b>%s</b>" % title,
+        "<b>%s</b>" % E(_short_addr(c["addr"])), E(c["case"]) + (" · " + E(c["uchal"]) if c["uchal"] else ""),
+        "매각 <b>%s</b>%s" % (_when(c["date"]), (" %s · %s" % (c["time"], E(c["place"]))) if c["time"] else ""),
+        "최저 <b>%s</b> · 입찰보증금 <b>%s</b> (최저가 %d%%)" % (_won(c["min_price"]), _won(c["deposit"]), c["dep_rate"]),
+        c["url"], "찜 해제 /unpick_%s" % c["code"]] if x)
+
+def _days_left(d):
+    try: y, m, dd = map(int, d.split("-")); return (_date(y, m, dd) - _date.today()).days
+    except Exception: return None
+
+def pick_cmd(st, text):
+    """찜 관련 명령 처리. 처리했으면 True"""
+    picks = st.setdefault("picks", {})
+    t = text.split("@")[0].strip()
+    m = re.match(r"/(un)?pick_(\d{10,20})$", t)
+    if m and m.group(1):
+        c = picks.pop(m.group(2), None)
+        send_telegram("찜 해제: %s" % _html.escape(_short_addr(c["addr"])) if c else "찜 목록에 없는 사건입니다.")
+        return True
+    if m:
+        try: c = case_info(m.group(2))
+        except Exception as e:
+            send_telegram("사건 정보를 못 읽었습니다 (%s). 잠시 뒤 다시 눌러 주세요." % type(e).__name__); return True
+        c["sent"] = []; picks[c["code"]] = c
+        send_telegram(_pick_text(c, "찜했습니다 · 매각 D-7·D-1 오전에 알려드립니다"))
+        return True
+    if t in ("/picks", "찜", "찜목록", "찜 목록"):
+        if not picks: send_telegram("찜한 물건이 없습니다. 알림 메시지의 /pick_… 을 누르면 찜됩니다."); return True
+        rows = sorted(picks.values(), key=lambda c: c["date"] or "9")
+        send_telegram("<b>찜 목록 · %d건</b>\n" % len(rows) + "\n".join(
+            "%s · %s · 최저 %s · 보증금 %s\n/unpick_%s" % (_when(c["date"]), _html.escape(_short_addr(c["addr"])),
+                                                     _won(c["min_price"]), _won(c["deposit"]), c["code"]) for c in rows))
+        return True
+    return False
+
+def pick_check(st):
+    """하루 1번: 찜한 사건을 다시 읽어 일정 변경·결과·D-day 알림"""
+    picks = st.get("picks", {})
+    for code in list(picks):
+        old = picks[code]
+        try: c = case_info(code); time.sleep(1.5)
+        except Exception as e:
+            print("pick check fail", code, type(e).__name__); continue
+        if c["sell"] > 0:
+            rate = c["sell"] / old["min_price"] * 100 if old["min_price"] else 0
+            send_telegram("<b>매각됨</b> %s\n%s · 낙찰 <b>%s</b> (직전 최저가 %s의 %d%%)\n%s" % (
+                _html.escape(_short_addr(old["addr"])), _html.escape(old["case"]), _won(c["sell"]), _won(old["min_price"]), round(rate), c["url"]))
+            picks.pop(code); continue
+        if c["date"] and c["date"] != old["date"]:
+            c["sent"] = []; picks[code] = c
+            send_telegram(_pick_text(c, "매각일이 바뀌었습니다 (이전 %s)" % (old["date"] or "-")))
+            continue
+        c["sent"] = old.get("sent", []); picks[code] = c
+        left = _days_left(c["date"])
+        if left is not None and left < -3:
+            send_telegram("찜 정리: %s — 매각일이 지났는데 새 일정이 없어 목록에서 뺐습니다.\n%s" % (_html.escape(_short_addr(c["addr"])), c["url"]))
+            picks.pop(code); continue
+        for dd in PICK_DDAYS:
+            if left == dd and dd not in c["sent"]:
+                title = "내일 입찰입니다" if dd == 1 else "입찰 %d일 전" % dd
+                extra = "\n준비물: 신분증 · 도장 · 입찰보증금 %s (수표 1장)" % _won(c["deposit"]) if dd == 1 else ""
+                send_telegram(_pick_text(c, title) + extra)
+                c["sent"].append(dd)
+
 def _fresh(args):
     """저장소 최신 코드를 받아 새 프로세스로 실행 → 코드 수정이 버튼에 바로 반영"""
     import subprocess
@@ -651,6 +751,10 @@ def listen(seconds):
             try: _fresh([])
             except Exception as e: send_telegram("경매 알림 실행 오류: %s" % _html.escape(str(e)[:200]), button=True)
             st["last_daily"] = today; json.dump(st, open(STATE_FILE, "w"))
+        if st.get("last_pick_check") != today and time.strftime("%H:%M") >= PICK_CHECK_AT:
+            try: pick_check(st)
+            except Exception as e: print("pick check error", type(e).__name__)
+            st["last_pick_check"] = today; json.dump(st, open(STATE_FILE, "w"))
         if st.get("last_gaechuk") != today and time.strftime("%H:%M") >= G_DAILY_AT:
             try: _fresh(["--gaechuk"])
             except Exception as e: send_telegram("개축 알림 실행 오류: %s" % _html.escape(str(e)[:200]), button=True)
@@ -672,6 +776,10 @@ def listen(seconds):
                 _answer(cq, "개축 퀀트를 지금 시점으로 조사합니다")
                 gaechuk = True
             m = u.get("message")
+            if m and str(m.get("chat", {}).get("id")) == chat:
+                try:
+                    if pick_cmd(st, m.get("text", "")): continue
+                except Exception as e: print("pick cmd error", type(e).__name__)
             if m and str(m.get("chat", {}).get("id")) == chat and (m.get("text", "").strip() in ("/scan", "/start", "조사", "다시조사", "다시 조사")):
                 rescan = True
             if m and str(m.get("chat", {}).get("id")) == chat and (m.get("text", "").strip() in ("/gaechuk", "개축", "개축조사", "개축 조사")):

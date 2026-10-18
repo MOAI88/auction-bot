@@ -9,6 +9,10 @@
   - 정렬: 좋은 길(세로(가) 이상) 물건 먼저 전부 → 도로 미확인 → '좁은 길'(맹지·세로불) 물건은 표시해서 맨 아래 (표시 상한 `G_SHOW_MAX` 는 좁은 길 물건에만 적용)
   - 위반건축물·지분·구분건물·권리 위험 물건 제외
 - 사건 링크는 URL 그대로 보냄 (텍스트 링크는 텔레그램이 'Open this link?' 확인창을 띄움)
+- 월세 퀀트 필요 월세는 40~120만까지 봄 (실거래 확인이 꺼져 있으면 70만까지만). 실거래가 받쳐주는 물건만 남음
+- **찜 + D-day**: 알림의 `/pick_사건코드` 를 누르면 찜 (state.json 의 picks). 매일 08:30(KST)에 사건 페이지를 다시 읽어
+  - 매각 D-7·D-1 알림 (D-1엔 입찰보증금·준비물 포함), 매각일 변경(유찰) 알림, 매각되면 낙찰가 알림 후 목록에서 제거
+  - `찜목록` / `/picks` 로 목록, `/unpick_사건코드` 로 해제
 - 메시지 아래 버튼 2개 → 그 시점 기준 **전체 목록** 다시 발송
   - **[↻ 월세 퀀트]** 또는 `조사` / `/scan`
   - **[🏗 개축 퀀트]** 또는 `개축` / `/gaechuk`
@@ -24,5 +28,5 @@
 3. Actions 탭 → auction-bot → Run workflow (첫 실행)
 
 기준값(보증금·수리비·목표 수익률 등)은 alert.py 상단 `P = dict(...)` 에서 수정.
-실거래 월세 기준(기간·면적 범위·최소 거래 수·전환율)은 `RENT_MONTHS`, `RENT_AREA_TOL`, `RENT_MIN_DEALS`, `RENT_CONV`, `RENT_MAX_DEP` 에서 수정.
+실거래 월세 기준(기간·면적 범위·최소 거래 수·전환율)은 `RENT_MONTHS`, `RENT_AREA_TOL`, `RENT_MIN_DEALS`, `RENT_CONV`, `RENT_MAX_DEP`, `RENT_STEPS` 에서 수정. 찜 알림 시각·D-day는 `PICK_CHECK_AT`, `PICK_DDAYS`.
 개축 퀀트 기준(예산·평당 단가·승인연도·최소 초과면적·제외 도로·알림 시각)은 `G_BUY_MAX`, `G_COST_PER_PY`, `G_BUILD_MAX`, `G_MAX_YEAR`, `G_MIN_EXCESS`, `G_MIN_BCR_EXCESS`, `BAD_ROAD`, `G_SHOW_MAX`, `G_DAILY_AT` 에서 수정.
