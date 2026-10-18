@@ -182,7 +182,8 @@ RENT_API = "https://apis.data.go.kr/1613000/RTMSDataSvcRHRent/getRTMSDataSvcRHRe
 RENT_MONTHS = 12        # 최근 몇 개월 거래를 볼지
 RENT_AREA_TOL = 0.20    # 전용면적 ±20% (최소 ±7㎡)
 RENT_MIN_DEALS = 3      # 동 단위 월세 거래가 이 건수 미만이면 '거래 부족'으로 제외
-RENT_CONV = 0.06        # 전월세 전환율(연) — 보증금 차이를 월세로 환산 (보증금 P["dep"] 기준)
+RENT_CONV = 0.045       # 전월세 전환율(연) — 보증금 차이를 월세로 환산 (보증금 P["dep"] 기준)
+RENT_MAX_DEP = 3000     # 보증금이 이보다 큰 반전세는 제외 (환산 월세가 부풀려짐), 만원
 RENT_CACHE = os.path.join(HERE, "rent.json")
 LAWD = {"종로구": "11110", "중구": "11140", "용산구": "11170", "성동구": "11200", "광진구": "11215", "동대문구": "11230",
         "중랑구": "11260", "성북구": "11290", "강북구": "11305", "도봉구": "11320", "노원구": "11350", "은평구": "11380",
@@ -254,7 +255,7 @@ def market_rent(it, key, cache):
     tol = max(area * RENT_AREA_TOL, 7)
     under = bool(re.search(r"지하|비0", it["addr"]))
     eq = sorted(r[3] + (r[2] - P["dep"]) * RENT_CONV / 12 for r in _rent_rows(lawd, key, cache)
-                if r[0].split()[:1] == [umd] and abs(r[1] - area) <= tol and ((r[4] < 0) == under))
+                if r[0].split()[:1] == [umd] and abs(r[1] - area) <= tol and ((r[4] < 0) == under) and r[2] <= RENT_MAX_DEP)
     if len(eq) < RENT_MIN_DEALS: return dict(n=len(eq), umd=umd)
     n = len(eq); mid = eq[n // 2] if n % 2 else (eq[n // 2 - 1] + eq[n // 2]) / 2
     return dict(n=n, umd=umd, rent=mid, lo=eq[n // 4], hi=eq[(n * 3) // 4], amin=area - tol, amax=area + tol)
