@@ -73,6 +73,11 @@ def tg(method, **params):
     with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=70) as r:
         return json.load(r)
 
+def _answer(cq, text):
+    """버튼 눌림 응답. 오래된 버튼(약 15분 경과)은 텔레그램이 400을 주므로 무시하고 조사는 계속"""
+    try: tg("answerCallbackQuery", callback_query_id=cq["id"], text=text)
+    except Exception as e: print("answerCallbackQuery skip", type(e).__name__)
+
 def send_telegram(text, button=False):
     env = load_env()
     url = "https://api.telegram.org/bot%s/sendMessage" % env["TELEGRAM_BOT_TOKEN"]
@@ -543,10 +548,10 @@ def listen(seconds):
             st["offset"] = u["update_id"] + 1
             cq = u.get("callback_query")
             if cq and str(cq.get("message", {}).get("chat", {}).get("id")) == chat and cq.get("data") == "rescan":
-                tg("answerCallbackQuery", callback_query_id=cq["id"], text="지금 시점으로 다시 조사합니다")
+                _answer(cq, "지금 시점으로 다시 조사합니다")
                 rescan = True
             if cq and str(cq.get("message", {}).get("chat", {}).get("id")) == chat and cq.get("data") == "gaechuk":
-                tg("answerCallbackQuery", callback_query_id=cq["id"], text="개축 퀀트를 지금 시점으로 조사합니다")
+                _answer(cq, "개축 퀀트를 지금 시점으로 조사합니다")
                 gaechuk = True
             m = u.get("message")
             if m and str(m.get("chat", {}).get("id")) == chat and (m.get("text", "").strip() in ("/scan", "/start", "조사", "다시조사", "다시 조사")):
