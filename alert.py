@@ -174,6 +174,92 @@ def risk_of(it):
 
 RENT_STEPS = [40, 45, 50, 55, 60, 65, 70]
 
+# =====================================================================
+# 실거래 월세 검증: 국토교통부 연립다세대 전월세 실거래가(data.go.kr)로
+# 같은 동·비슷한 전용면적의 최근 월세 중간값이 필요 월세 이상인 물건만 추천
+# =====================================================================
+RENT_API = "https://apis.data.go.kr/1613000/RTMSDataSvcRHRent/getRTMSDataSvcRHRent"
+RENT_MONTHS = 12        # 최근 몇 개월 거래를 볼지
+RENT_AREA_TOL = 0.20    # 전용면적 ±20% (최소 ±7㎡)
+RENT_MIN_DEALS = 3      # 동 단위 월세 거래가 이 건수 미만이면 '거래 부족'으로 제외
+RENT_CONV = 0.06        # 전월세 전환율(연) — 보증금 차이를 월세로 환산 (보증금 P["dep"] 기준)
+RENT_CACHE = os.path.join(HERE, "rent.json")
+LAWD = {"종로구": "11110", "중구": "11140", "용산구": "11170", "성동구": "11200", "광진구": "11215", "동대문구": "11230",
+        "중랑구": "11260", "성북구": "11290", "강북구": "11305", "도봉구": "11320", "노원구": "11350", "은평구": "11380",
+        "서대문구": "11410", "마포구": "11440", "양천구": "11470", "강서구": "11500", "구로구": "11530", "금천구": "11545",
+        "영등포구": "11560", "동작구": "11590", "관악구": "11620", "서초구": "11650", "강남구": "11680", "송파구": "11710",
+        "강동구": "11740", "남양주시": "41360"}
+RENT_STATS = {}
+
+def _rent_key():
+    k = os.environ.get("DATA_GO_KR_KEY", "")
+    if not k:
+        for p in (os.path.join(HERE, "telegram.env"), os.path.join(os.path.dirname(HERE), ".env")):
+            try:
+                for line in open(p, encoding="utf-8"):
+                    if line.strip().startswith("DATA_GO_KR_KEY="): k = line.split("=", 1)[1].strip()
+            except OSError: pass
+            if k: break
+    return urllib.parse.unquote(k) if "%" in k else k   # 'Encoding' 키를 넣어도 동작
+
+def _locality(addr):
+    """주소 → (시군구 코드, 동/읍/면 이름)"""
+    t = addr.split()
+    lawd = next((LAWD[x] for x in t[:3] if x in LAWD), None)
+    umd = next((x for x in t[1:4] if re.search(r"(동|읍|면|가)$", x) and x not in LAWD), None)
+    return lawd, umd
+
+def _rent_fetch(lawd, ym, key):
+    rows, page = [], 1
+    while True:
+        q = urllib.parse.urlencode(dict(serviceKey=key, LAWD_CD=lawd, DEAL_YMD=ym, pageNo=page, numOfRows=1000))
+        x = urllib.request.urlopen(RENT_API + "?" + q, timeout=30).read().decode("utf-8", "ignore")
+        code = re.search(r"<resultCode>\s*(\w+)\s*</resultCode>", x)
+        if not code or code.group(1).strip("0"):
+            msg = re.search(r"<(?:resultMsg|returnAuthMsg)>([^<]*)", x)
+            raise RuntimeError("rent api: %s" % (msg.group(1) if msg else "응답 형식 오류"))
+        items = re.findall(r"<item>(.*?)</item>", x, re.S)
+        for it in items:
+            g = lambda tag: (re.search(r"<%s>\s*([^<]*?)\s*</%s>" % (tag, tag), it) or [None, ""])[1]
+            rent = _num(g("monthlyRent"))
+            if rent <= 0: continue   # 전세 제외
+            rows.append([g("umdNm"), _num(g("excluUseAr")), _num(g("deposit")), rent, int(_num(g("floor")) or 0)])
+        tc = re.search(r"<totalCount>\s*(\d+)", x)
+        if not items or page * 1000 >= int(tc.group(1) if tc else 0): break
+        page += 1; time.sleep(0.3)
+    return rows
+
+def _months(n):
+    y, m = map(int, time.strftime("%Y %m").split()); out = []
+    for _ in range(n):
+        out.append("%04d%02d" % (y, m)); m -= 1
+        if m == 0: y, m = y - 1, 12
+    return out
+
+def _rent_rows(lawd, key, cache):
+    rows, today = [], time.strftime("%Y-%m-%d")
+    week_ago = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
+    for i, ym in enumerate(_months(RENT_MONTHS)):
+        c = cache.get(lawd + ":" + ym)
+        if not c or (i < 3 and c["t"] < week_ago):   # 최근 3개월은 신고 지연(30일)이 있어 주 1회 다시 받음
+            c = {"t": today, "rows": _rent_fetch(lawd, ym, key)}; cache[lawd + ":" + ym] = c; time.sleep(0.3)
+        rows += c["rows"]
+    return rows
+
+def market_rent(it, key, cache):
+    """같은 동·비슷한 면적·같은 층 유형(지하/지상) 월세 실거래 중간값 (보증금 P['dep'] 기준 환산)"""
+    lawd, umd = _locality(it["addr"])
+    area = _num(it["area"])
+    if not lawd or not umd or area <= 0: return None
+    tol = max(area * RENT_AREA_TOL, 7)
+    under = bool(re.search(r"지하|비0", it["addr"]))
+    eq = sorted(r[3] + (r[2] - P["dep"]) * RENT_CONV / 12 for r in _rent_rows(lawd, key, cache)
+                if r[0].split()[:1] == [umd] and abs(r[1] - area) <= tol and ((r[4] < 0) == under))
+    if len(eq) < RENT_MIN_DEALS: return dict(n=len(eq), umd=umd)
+    n = len(eq); mid = eq[n // 2] if n % 2 else (eq[n // 2 - 1] + eq[n // 2]) / 2
+    return dict(n=n, umd=umd, rent=mid, lo=eq[n // 4], hi=eq[(n * 3) // 4], amin=area - tol, amax=area + tol)
+
+
 def screen(items):
     """최저가로 낙찰 시 목표(15%·월 20만)를 맞추는 데 필요한 최소 월세를 붙여 반환"""
     hits = []
@@ -188,8 +274,29 @@ def screen(items):
             if cap and it["min_price"] <= cap:
                 hits.append((it, reg, r, cap, calc(it["min_price"], r, it.get("pub"), reg)))
                 break
+    hits = _verify_rent(hits)
     hits.sort(key=lambda h: (h[2], h[0]["date"]))
     return hits
+
+def _verify_rent(hits):
+    """실거래 월세 중간값이 필요 월세 이상인 물건만 남기고, 수익률을 실거래 월세로 다시 계산"""
+    key = _rent_key(); RENT_STATS.clear(); RENT_STATS.update(on=bool(key), cand=len(hits), low=0, few=0, err=0)
+    if not key: return [h + (None,) for h in hits]
+    try: cache = json.load(open(RENT_CACHE, encoding="utf-8"))
+    except Exception: cache = {}
+    out = []
+    for it, reg, r, cap, d in hits:
+        try: mk = market_rent(it, key, cache)
+        except Exception as e:
+            print("rent fail", type(e).__name__, str(e)[:80]); RENT_STATS["err"] += 1; continue
+        if not mk or "rent" not in mk: RENT_STATS["few"] += 1; continue
+        real = int(round(mk["rent"]))
+        if real < r: RENT_STATS["low"] += 1; continue
+        out.append((it, reg, real, max_bid(real, it.get("pub"), reg) or cap, calc(it["min_price"], real, it.get("pub"), reg), mk))
+    keep = set(_months(RENT_MONTHS))
+    cache = {k: v for k, v in cache.items() if k.split(":")[1] in keep}
+    json.dump(cache, open(RENT_CACHE, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    return out
 
 import html as _html
 from datetime import date as _date
@@ -200,6 +307,12 @@ def _won(m):
         e, r = divmod(m, 10000)
         return "%d억" % e + (" %s만" % f"{r:,}" if r else "")
     return f"{m:,}만"
+
+def _rent_note():
+    s = RENT_STATS
+    if not s or not s.get("on"): return "\n실거래 월세 확인 꺼짐 (DATA_GO_KR_KEY 없음) — 월세는 가정값"
+    t = "\n실거래 월세 확인: 후보 %d건 중 시세 미달 %d · 거래 부족 %d 제외" % (s["cand"], s["low"], s["few"])
+    return t + (" · 조회 실패 %d" % s["err"] if s["err"] else "")
 
 def _short_addr(a):
     for p in ["서울특별시 ", "경기도 남양주시 "]:
@@ -218,12 +331,12 @@ def _when(d):
 def fmt(hits, new_codes=None):
     E = _html.escape
     if not hits:
-        return ["<b>경매 퀀트 알림</b>\n오늘은 기준(수익률 15%·월 순현금 20만↑)에 맞는 새 물건이 없습니다."]
+        return ["<b>경매 퀀트 알림</b>\n오늘은 기준(수익률 15%·월 순현금 20만↑)에 맞는 새 물건이 없습니다." + _rent_note()]
     n_seoul = sum(1 for h in hits if h[1] == "서울")
     head = ("<b>경매 퀀트 알림 · %d건</b>\n서울 %d · 남양주 %d\n"
-            "<i>최저가 낙찰·무대출 기준 (보증금 1,000 · 수리 500)</i>") % (len(hits), n_seoul, len(hits) - n_seoul)
+            "<i>최저가 낙찰·무대출 기준 (보증금 1,000 · 수리 500)%s</i>") % (len(hits), n_seoul, len(hits) - n_seoul, _rent_note())
     blocks = []
-    for i, (it, reg, r, cap, d) in enumerate(hits, 1):
+    for i, (it, reg, r, cap, d, mk) in enumerate(hits, 1):
         badges = []
         if new_codes is not None and it["m_code"] in new_codes: badges.append("NEW")
         if "지하" in it["addr"] or "비0" in it["addr"]: badges.append("반지하")
@@ -236,9 +349,13 @@ def fmt(hits, new_codes=None):
             "매각 <b>%s</b>" % _when(it["date"]),
             "",
             "최저 <b>%s</b>  (감정 %s의 %d%% · 유찰 %s회)" % (_won(it["min_price"]), _won(it["appraisal"]), round(rate), it["uchal"]),
-            "▶ 월세 <b>%d만</b> 받으면 수익률 <b>%.1f%%</b>" % (r, d["coc"] * 100),
+            ("▶ 실거래 월세 <b>%d만</b>이면 수익률 <b>%.1f%%</b>" if mk else "▶ 월세 <b>%d만</b> 받으면 수익률 <b>%.1f%%</b>") % (r, d["coc"] * 100),
             "   실투자 %s · 월 +%d만 · 입찰상한 %s" % (_won(d["inv"]), round(d["cash"]), _won(cap)),
         ]
+        if mk:
+            lines.append("   %s 전용 %d~%d㎡%s 최근 %d개월 월세 %d건 · 중간 %d만 (%d~%d만)" % (
+                E(mk["umd"]), round(mk["amin"]), round(mk["amax"]), " 지하" if re.search(r"지하|비0", it["addr"]) else "",
+                RENT_MONTHS, mk["n"], round(mk["rent"]), round(mk["lo"]), round(mk["hi"])))
         if warn:
             lines.append("주의: " + E(", ".join(warn)))
         lines.append(E(it["url"]))   # 텍스트 링크(<a>)는 텔레그램이 확인창을 띄워서 URL 그대로 노출

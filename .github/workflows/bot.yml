@@ -22,6 +22,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
         run: |
           git config user.name "auction-bot"
           git config user.email "auction-bot@users.noreply.github.com"
@@ -31,7 +32,7 @@ jobs:
         run: |
           git config user.name "auction-bot"
           git config user.email "auction-bot@users.noreply.github.com"
-          for f in seen.json state.json gaechuk.json; do if [ -f "$f" ]; then git add "$f"; fi; done
+          for f in seen.json state.json gaechuk.json rent.json; do if [ -f "$f" ]; then git add "$f"; fi; done
           git diff --cached --quiet || (git commit -m "state $(date -u +%FT%TZ)" && git pull --rebase && git push)
       - name: start next listener
         if: always()
