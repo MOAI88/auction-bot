@@ -220,9 +220,18 @@ def _rent_fetch(lawd, ym, key):
     rows, page = [], 1
     while True:
         q = urllib.parse.urlencode(dict(serviceKey=key, LAWD_CD=lawd, DEAL_YMD=ym, pageNo=page, numOfRows=1000))
-        x = urllib.request.urlopen(RENT_API + "?" + q, timeout=30).read().decode("utf-8", "ignore")
-        code = re.search(r"<resultCode>\s*(\w+)\s*</resultCode>", x)
-        if not code or code.group(1).strip("0"):
+        x = ""
+        for attempt in range(4):   # 네트워크 오류·서버 혼잡·일시적 레이트 제한 대비 재시도+백오프
+            try:
+                x = urllib.request.urlopen(RENT_API + "?" + q, timeout=30).read().decode("utf-8", "ignore")
+            except Exception:
+                time.sleep(1.5 * (attempt + 1)); continue
+            code = re.search(r"<resultCode>\s*(\w+)\s*</resultCode>", x)
+            c = code.group(1).strip() if code else ""
+            if c in ("000", "00"): break            # 정상
+            if c in ("03", "04"): return rows        # NODATA(해당 월 거래 없음) → 빈 결과, 오류 아님
+            time.sleep(2.0 * (attempt + 1))          # 그 외(혼잡/제한/형식오류) → 백오프 후 재시도
+        else:
             msg = re.search(r"<(?:resultMsg|returnAuthMsg)>([^<]*)", x)
             raise RuntimeError("rent api: %s" % (msg.group(1) if msg else "응답 형식 오류"))
         items = re.findall(r"<item>(.*?)</item>", x, re.S)
@@ -298,7 +307,8 @@ def _verify_rent(hits):
     for it, reg, r, cap, d in hits:
         try: mk = market_rent(it, key, cache)
         except Exception as e:
-            print("rent fail", type(e).__name__, str(e)[:80]); RENT_STATS["err"] += 1; continue
+            print("rent fail", type(e).__name__, str(e)[:80]); RENT_STATS["err"] += 1
+            out.append((it, reg, r, cap, d, None)); continue   # 조회 실패 시 버리지 말고 가정 월세로 유지(물건이 사라지지 않게)
         if not mk or "rent" not in mk: RENT_STATS["few"] += 1; continue
         real = int(round(mk["rent"]))
         if real < r: RENT_STATS["low"] += 1; continue
@@ -322,7 +332,7 @@ def _rent_note():
     s = RENT_STATS
     if not s or not s.get("on"): return "\n실거래 월세 확인 꺼짐 (DATA_GO_KR_KEY 없음) — 월세는 가정값"
     t = "\n실거래 월세 확인: 후보 %d건 중 시세 미달 %d · 거래 부족 %d 제외" % (s["cand"], s["low"], s["few"])
-    return t + (" · 조회 실패 %d" % s["err"] if s["err"] else "")
+    return t + (" · 조회 실패 %d건은 가정 월세로 포함" % s["err"] if s["err"] else "")
 
 def _short_addr(a):
     for p in ["서울특별시 ", "경기도 남양주시 ", "경기 남양주시 ", "서울 "]:
